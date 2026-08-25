@@ -1,52 +1,52 @@
 import os
 import streamlit as st
 from dotenv import load_dotenv
-
-# Import your agent functions from src/agents.py
 from src.agents import run_researcher, run_reviewer
 
 load_dotenv()
 
-# Streamlit Page Setup
-st.set_page_config(page_title="Rich Dad RAG Agents", page_icon="📚", layout="centered")
+st.set_page_config(page_title="RAG Multi-Agent Assistant", page_icon="", layout="centered")
 
-st.title("📚 Rich Dad, Poor Dad - Multi-Agent Assistant")
-st.markdown("Ask any question about the book. Your **Researcher Agent** will query the Qdrant database, and your **Reviewer Agent** will polish the final response!")
+st.title("LangChain & Qdrant Documentation Assistant")
+st.markdown("Query the official documentation. Watched over by a **Researcher Agent** and audited by a strict **Reviewer Agent**.")
 
-# Initialize chat history in session state if it doesn't exist
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display prior chat history when the app reruns
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        if "sources" in message and message["sources"]:
+            with st.expander("View Retrieved Source Passages"):
+                for idx, doc in enumerate(message["sources"]):
+                    st.markdown(f"**Source {idx+1}:**\n```text\n{doc.page_content}\n```")
 
-# Accept user input from the chat box at the bottom
-if user_query := st.chat_input("What would you like to know from the book?"):
-    
-    # 1. Display user message in chat container
+if user_query := st.chat_input("Ask a technical question about LangChain or Qdrant..."):
     st.session_state.messages.append({"role": "user", "content": user_query})
     with st.chat_message("user"):
         st.markdown(user_query)
 
-    # 2. Generate Assistant Response using the Multi-Agent Pipeline
     with st.chat_message("assistant"):
-        # Create an expandable area to watch the agents work behind the scenes
-        with st.status(" Multi-agent workflow in progress...", expanded=True) as status:
+        with st.status("Multi-agent pipeline running...", expanded=True) as status:
+            st.write(" **Researcher Agent:** Retrieving document chunks...")
+            research_result = run_researcher(user_query)
+            draft = research_result["draft"]
+            sources = research_result["source_docs"]
             
-            # Step 1: Researcher Agent searches Qdrant
-            st.write("🔍 **Researcher Agent:** Querying Qdrant vector database...")
-            research_draft = run_researcher(user_query)
+            st.write("**Reviewer Agent:** Auditing claims and checking source backing...")
+            final_reviewed_output = run_reviewer(user_query, draft, sources)
             
-            # Step 2: Reviewer Agent audits and polishes
-            st.write(" **Reviewer Agent:** Auditing draft for clarity and accuracy...")
-            final_answer = run_reviewer(user_query, research_draft)
-            
-            status.update(label="Workflow complete!", state="complete", expanded=False)
+            status.update(label="Workflow and Audit complete!", state="complete", expanded=False)
 
-        # Display the final polished answer in the chat
-        st.markdown(final_answer)
+        st.markdown(final_reviewed_output)
         
-        # Save assistant response to session history
-        st.session_state.messages.append({"role": "assistant", "content": final_answer})
+        if sources:
+            with st.expander(" View Retrieved Source Passages"):
+                for idx, doc in enumerate(sources):
+                    st.markdown(f"**Source {idx+1}:**\n```text\n{doc.page_content}\n```")
+
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": final_reviewed_output,
+            "sources": sources
+        })
