@@ -1,40 +1,53 @@
 import os
 import time
-from pathlib import Path
 from dotenv import load_dotenv
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import RecursiveUrlLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_qdrant import QdrantVectorStore
+from bs4 import BeautifulSoup
 from src.config import EMBEDDINGS
 
 load_dotenv()
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PDF_PATH = PROJECT_ROOT / "data" / "rich_dad_poor_dad.pdf"
-
 def main():
-    print(" Starting Ingestion Process...")
+    print(" Starting Documentation Ingestion Process (LangChain & Qdrant)...")
     
-    if not PDF_PATH.exists():
-        raise FileNotFoundError(f"PDF not found at {PDF_PATH}. Make sure it's in the data/ folder!")
+    # Official documentation sources to ingest
+    docs_urls = [
+        "https://python.langchain.com/docs/concepts/",
+        "https://qdrant.tech/documentation/"
+    ]
+    
+    all_chunks = []
 
-    print(f"📄 Loading PDF from: {PDF_PATH}")
-    loader = PyPDFLoader(str(PDF_PATH))
-    raw_documents = loader.load()
-    
-    print("✂️ Chunking text...")
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-    chunked_docs = text_splitter.split_documents(raw_documents)
-    print(f"✅ Created {len(chunked_docs)} chunks.")
+    for url in docs_urls:
+        print(f"Scraping and loading docs from: {url}")
+        try:
+            # Use RecursiveUrlLoader to pull web documentation pages
+            loader = RecursiveUrlLoader(
+                url=url, 
+                max_depth=2, 
+                extractor=lambda x: BeautifulSoup(x, "html.parser").get_text()
+            )
+            raw_docs = loader.load()
+            
+            print(f" Chunking text for {url}...")
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+            chunked_docs = text_splitter.split_documents(raw_docs)
+            all_chunks.extend(chunked_docs)
+            print(f" Created {len(chunked_docs)} chunks from {url}.")
+        except Exception as e:
+            print(f"Error loading {url}: {e}")
 
-    print("☁️ Uploading to Qdrant Cloud in ultra-safe micro-batches...")
-    
-    # Tiny batches of 10 chunks with a 15-second pause to permanently dodge 429 limits
+    if not all_chunks:
+        raise ValueError("No documents were successfully loaded and chunked!")
+
+    print(f"☁️ Uploading total {len(all_chunks)} chunks to Qdrant Cloud in micro-batches...")
     batch_size = 10
-    total_batches = (len(chunked_docs) + batch_size - 1) // batch_size
+    total_batches = (len(all_chunks) + batch_size - 1) // batch_size
     
-    for i in range(0, len(chunked_docs), batch_size):
-        batch = chunked_docs[i:i + batch_size]
+    for i in range(0, len(all_chunks), batch_size):
+        batch = all_chunks[i:i + batch_size]
         current_batch_num = (i // batch_size) + 1
         print(f"Uploading micro-batch {current_batch_num} of {total_batches}...")
         
@@ -46,11 +59,10 @@ def main():
             collection_name="rich_dad_corpus"
         )
         
-        if i + batch_size < len(chunked_docs):
-            print(" Pausing 15 seconds to respect free-tier rate limits...")
+        if i + batch_size < len(all_chunks):
             time.sleep(15)
 
-    print(" Ingestion Complete! All data is safely stored in Qdrant Cloud.")
+    print("\nDocumentation Ingested Successfully into Qdrant Cloud!")
 
 if __name__ == "__main__":
     main()
