@@ -8,22 +8,18 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from src.config import EMBEDDINGS
 
-# Suppress minor SDK warnings in the terminal
 warnings.filterwarnings("ignore", category=UserWarning)
-
 load_dotenv()
 
 def format_docs(docs):
-    """Helper function to combine retrieved chunks into a single text block."""
     return "\n\n".join(doc.page_content for doc in docs)
 
 # ==========================================
-# AGENT 1: THE RESEARCHER
+# AGENT 1: THE RESEARCHER (Returns Answer + Source Docs)
 # ==========================================
 def run_researcher(query: str):
-    print(f" [Researcher] Searching Qdrant database for: '{query}'...")
+    print(f"[Researcher] Searching Qdrant database for: '{query}'...")
 
-    # 1. Connect to Qdrant Cloud
     vector_store = QdrantVectorStore.from_existing_collection(
         embedding=EMBEDDINGS,
         url=os.getenv("QDRANT_URL"),
@@ -31,81 +27,65 @@ def run_researcher(query: str):
         collection_name="rich_dad_corpus"
     )
 
-    # 2. Setup the retriever to grab top 3 chunks
     retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+    
+    # Retrieve docs explicitly so we can pass them to the UI
+    retrieved_docs = retriever.invoke(query)
+    context_text = format_docs(retrieved_docs)
 
-    # 3. Setup Gemini Brain
     llm = ChatGoogleGenerativeAI(
         model="gemini-3.6-flash",
         google_api_key=os.getenv("GEMINI_API_KEY")
     )
 
-    # 4. Prompt rules for finding info
     prompt = ChatPromptTemplate.from_template(
         "You are an expert research assistant. Use the following pieces "
-        "of retrieved context from the book to answer the question. "
+        "of retrieved context from the official documentation to answer the question. "
         "If you don't know the answer or if it's not in the context, say that "
         "you don't know.\n\n"
         "Context:\n{context}\n\n"
         "Question: {question}"
     )
 
-    # 5. Build pipeline
-    rag_chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
+    chain = prompt | llm | StrOutputParser()
+    answer = chain.invoke({"context": context_text, "question": query})
 
-    # 6. Run and return draft
-    return rag_chain.invoke(query)
+    return {
+        "draft": answer,
+        "source_docs": retrieved_docs
+    }
 
 
 # ==========================================
-# AGENT 2: THE REVIEWER
+# AGENT 2: THE REVIEWER (Strict Fact-Checker & Verdict)
 # ==========================================
-def run_reviewer(original_query: str, research_draft: str):
-    print(f" [Reviewer] Auditing and polishing the research draft...")
+def run_reviewer(original_query: str, research_draft: str, source_docs: list):
+    print(f" [Reviewer] Auditing draft against source passages...")
 
-    # 1. Setup Gemini Brain for the Reviewer
     llm = ChatGoogleGenerativeAI(
         model="gemini-3.6-flash",
         google_api_key=os.getenv("GEMINI_API_KEY")
     )
 
-    # 2. Prompt rules for editorial quality control
+    context_str = format_docs(source_docs)
+
     review_prompt = ChatPromptTemplate.from_template(
-        "You are a strict editorial reviewer and fact-checker. "
-        "Review the following research draft that was generated to answer a user's question.\n\n"
+        "You are a strict editorial reviewer and technical fact-checker. "
+        "Your job is to audit the Researcher's draft against the provided Source Passages.\n\n"
         "Original Question: {query}\n\n"
+        "Source Passages:\n{context}\n\n"
         "Research Draft:\n{draft}\n\n"
-        "Your task: Check the draft for clarity, conciseness, and accuracy based on the context. "
-        "Refine and polish the output into a professional, well-structured final response. "
-        "Do not invent new facts."
+        "Instructions:\n"
+        "1. Verify whether every claim in the Research Draft is directly backed by the Source Passages.\n"
+        "2. If there are unsupported claims or hallucinations, explicitly REJECT or FLAG them and correct them.\n"
+        "3. Provide a clear verdict (e.g., 'VERDICT: APPROVED' or 'VERDICT: REJECTED/CORRECTED') followed by your polished response."
     )
 
-    # 3. Build simple chain
     review_chain = review_prompt | llm | StrOutputParser()
-
-    # 4. Run and return final polished output
-    return review_chain.invoke({"query": original_query, "draft": research_draft})
-
-
-# ==========================================
-# ORCHESTRATION (Running both together)
-# ==========================================
-if __name__ == "__main__":
-    test_question = "how to build a house?"
+    final_output = review_chain.invoke({
+        "query": original_query, 
+        "context": context_str, 
+        "draft": research_draft
+    })
     
-    # Step 1: Agent 1 researches and drafts
-    research_result = run_researcher(test_question)
-    print("\n [Researcher Draft]:")
-    print(research_result)
-    
-    print("\n" + "="*50 + "\n")
-    
-    # Step 2: Agent 2 reviews and polishes
-    final_output = run_reviewer(test_question, research_result)
-    print("\n [Reviewer Final Output]:")
-    print(final_output)
+    return final_output
